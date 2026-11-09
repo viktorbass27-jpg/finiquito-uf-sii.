@@ -1,0 +1,90 @@
+name: Publicar datos oficiales de UF
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/sii_uf.py'
+      - '.github/workflows/publish-sii-uf.yml'
+  pull_request:
+    paths:
+      - 'scripts/sii_uf.py'
+      - '.github/workflows/publish-sii-uf.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+permissions:
+  contents: read
+jobs:
+  verificar:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtener UF oficial y validar datos
+        run: |
+          mkdir -p data/uf
+          YEAR=$(date -u +%Y)
+          python3 scripts/sii_uf.py "$YEAR" > "data/uf/$YEAR.json"
+          # La UF de enero depende de diciembre del año anterior.
+          PREVIOUS_YEAR=$((YEAR - 1))
+          python3 scripts/sii_uf.py "$PREVIOUS_YEAR" > "data/uf/$PREVIOUS_YEAR.json"
+          python3 - <<'PY'
+          import json,glob
+          for path in glob.glob('data/uf/*.json'):
+              d=json.load(open(path))
+              assert d['source']=='Servicio de Impuestos Internos (SII)'
+              assert len(d['values'])>0
+              assert all(isinstance(v,int) and 1000000<v<10000000 for v in d['values'].values())
+          PY
+      - name: Comprobar disponibilidad de UF para el corte legal
+        run: |
+          python3 - <<'PY'
+          import calendar,json
+          from datetime import date,timedelta
+          today=date.today()
+          cutoff=today.replace(day=1)-timedelta(days=1)
+          path=f'data/uf/{cutoff.year}.json'
+          data=json.load(open(path))
+          assert cutoff.isoformat() in data['values'], f'Falta UF para {cutoff.isoformat()}'
+          print(f'UF disponible para corte legal: {cutoff.isoformat()}')
+          PY
+      - name: Guardar archivos para revisión sin publicarlos
+        uses: actions/upload-artifact@v4
+        with:
+          name: uf-oficial-previa
+          path: data/uf/*.json
+          retention-days: 7
+  publicar:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Obtener UF oficial y validar datos
+        run: |
+          mkdir -p data/uf
+          YEAR=$(date -u +%Y)
+          python3 scripts/sii_uf.py "$YEAR" > "data/uf/$YEAR.json"
+          # La UF de enero depende de diciembre del año anterior.
+          PREVIOUS_YEAR=$((YEAR - 1))
+          python3 scripts/sii_uf.py "$PREVIOUS_YEAR" > "data/uf/$PREVIOUS_YEAR.json"
+          python3 - <<'PY'
+          import json,glob
+          for path in glob.glob('data/uf/*.json'):
+              d=json.load(open(path))
+              assert d['source']=='Servicio de Impuestos Internos (SII)'
+              assert len(d['values'])>0
+              assert all(isinstance(v,int) and 1000000<v<10000000 for v in d['values'].values())
+          PY
+      - name: Publicar únicamente cuando hay cambios
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/uf/
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualizar UF oficial desde SII"
+            git push
+          fi
